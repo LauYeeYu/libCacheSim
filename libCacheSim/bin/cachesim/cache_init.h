@@ -146,6 +146,17 @@ static inline cache_t *create_cache(const char *trace_path,
     }
     cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
     cache = BeladySize_init(cc_params, eviction_params);
+  } else if (strcasecmp(eviction_algo, "beladyCompute") == 0) {
+    if (strcasestr(trace_path, "oracleGeneral") == NULL &&
+        strcasestr(trace_path, "lcs") == NULL) {
+      WARN("beladyCompute is only supported for oracleGeneral and lcs trace\n");
+      WARN("to convert a trace to lcs format\n");
+      WARN("./bin/traceConv input_trace trace_format output_trace\n");
+      WARN("./bin/traceConv ../data/cloudPhysicsIO.txt txt\n");
+      exit(1);
+    }
+    cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
+    cache = BeladyCompute_init(cc_params, eviction_params);
   } else {
     ERROR("do not support algorithm %s\n", eviction_algo);
     abort();
