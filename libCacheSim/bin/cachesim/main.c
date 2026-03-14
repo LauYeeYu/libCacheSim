@@ -76,9 +76,7 @@ int main(int argc, char **argv) {
              "%s %s cache size %8ld%s, %lld req, miss ratio %.4lf",
              args.reader->trace_path, result[i].cache_name,
              (long)(result[i].cache_size / size_unit), size_unit_str,
-             (long long)result[i].n_req,
-             (double)result[i].n_miss / (double)result[i].n_req,
-             (double)result[i].n_miss_byte / (double)result[i].n_req_byte);
+             (long long)result[i].n_req, miss_ratio);
     if (result[i].n_req_byte > result[i].n_req) {
       snprintf(output_str + strlen(output_str), 1024 - strlen(output_str),
                ", byte miss ratio %.4lf\n", byte_miss_ratio);
