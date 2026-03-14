@@ -29,7 +29,6 @@ set(eviction_sources_c
         eviction/ARCv0.c         # an inefficient version but easier to understand
         eviction/Belady.c
         eviction/BeladySize.c
-        eviction/BeladyCompute.c
         eviction/CAR.c
         eviction/Cacheus.c
         eviction/Clock.c
@@ -50,16 +49,18 @@ set(eviction_sources_c
         eviction/QDLP.c
         eviction/Random.c
         eviction/RandomLRU.c
-        eviction/RandomTwo.c
         eviction/S3FIFO.c
         eviction/S3FIFOSize.c
-        eviction/S3FIFOCompute.c
         eviction/Sieve.c
         eviction/Size.c
         eviction/SLRU.c
         eviction/SLRUv0.c        # an inefficient version but easier to understand
         eviction/TwoQ.c
         eviction/WTinyLFU.c
+
+        eviction/BeladyCompute.c
+        eviction/RandomCompute.c
+        eviction/S3FIFOCompute.c
 
         # these are sub-algorithms used by other algorithms
         eviction/CR_LFU.c
@@ -87,7 +88,7 @@ set(eviction_sources_cpp
 
 # LRB
 if (ENABLE_LRB)
-    set (eviction_sources_cpp ${eviction_sources_cpp} 
+    set (eviction_sources_cpp ${eviction_sources_cpp}
         eviction/LRB/lrb.cpp
         eviction/LRB/LRB_Interface.cpp
         )
@@ -95,7 +96,7 @@ endif()
 
 # 3L Cache
 if (ENABLE_3L_CACHE)
-    set (eviction_sources_cpp ${eviction_sources_cpp} 
+    set (eviction_sources_cpp ${eviction_sources_cpp}
         eviction/3LCache/ThreeLCache_Interface.cpp
         eviction/3LCache/ThreeLCache.cpp
         )
@@ -103,8 +104,8 @@ endif()
 
 # GLCache
 if (ENABLE_GLCACHE)
-    set(eviction_sources_c 
-        ${eviction_sources_c} 
+    set(eviction_sources_c
+        ${eviction_sources_c}
         eviction/GLCache/bucket.c
         eviction/GLCache/dataPrep.c
         eviction/GLCache/eviction.c
