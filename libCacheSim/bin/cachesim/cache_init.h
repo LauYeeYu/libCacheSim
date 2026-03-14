@@ -49,7 +49,6 @@ static inline cache_t *create_cache(const char *trace_path,
       {"flashProb", flashProb_init},
       {"gdsf", GDSF_init},
       {"lhd", LHD_init},
-      {"lhd_compute", LHD_compute_init},
       {"lecar", LeCaR_init},
       {"lecarv0", LeCaRv0_init},
       {"lfu", LFU_init},
@@ -76,6 +75,10 @@ static inline cache_t *create_cache(const char *trace_path,
       {"slruv0", SLRUv0_init},
       {"twoq", TwoQ_init},
       {"wtinyLFU", WTinyLFU_init},
+
+      {"s3fifo_compute", S3FIFOCompute_init},
+      {"gdsf_compute", GDSF_compute_init},
+      {"lhd_compute", LHD_compute_init},
 #ifdef ENABLE_3L_CACHE
       {"3LCache", ThreeLCache_init},
 #endif

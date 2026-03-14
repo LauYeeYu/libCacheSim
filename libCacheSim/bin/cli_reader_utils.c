@@ -51,6 +51,8 @@ trace_type_e trace_type_str_to_enum(const char *trace_type_str,
     return ORACLE_SYS_TWRNS_TRACE;
   } else if (strcasecmp(trace_type_str, "valpinTrace") == 0) {
     return VALPIN_TRACE;
+  } else if (strcasecmp(trace_type_str, "lcsllm") == 0) {
+    return LCSLLM_TRACE;
   } else {
     ERROR("unsupported trace type: %s\n", trace_type_str);
   }
@@ -204,6 +206,8 @@ trace_type_e detect_trace_type(const char *trace_path) {
     trace_type = TWR_TRACE;
   } else if (strcasestr(trace_path, ".twrNS.") != NULL) {
     trace_type = TWRNS_TRACE;
+  } else if (strcasestr(trace_path, ".lcsllm.") != NULL) {
+    trace_type = LCSLLM_TRACE;
   } else if (strcasestr(trace_path, "oracleSysTwrNS") != NULL) {
     trace_type = ORACLE_SYS_TWRNS_TRACE;
   } else {

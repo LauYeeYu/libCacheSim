@@ -66,14 +66,30 @@ int main(int argc, char **argv) {
 
   printf("\n");
   for (int i = 0; i < args.n_cache_size * args.n_eviction_algo; i++) {
+    double miss_ratio = (double)result[i].n_miss / (double)result[i].n_req;
+    double byte_miss_ratio =
+        (double)result[i].n_miss_byte / (double)result[i].n_req_byte;
+    double cost_saving_ratio =
+        1 - (double)result[i].miss_cost / (double)result[i].total_cost;
+
     snprintf(output_str, 1024,
-             "%s %s cache size %8ld%s, %lld req, miss ratio %.4lf, byte miss "
-             "ratio %.4lf\n",
+             "%s %s cache size %8ld%s, %lld req, miss ratio %.4lf",
              args.reader->trace_path, result[i].cache_name,
              (long)(result[i].cache_size / size_unit), size_unit_str,
              (long long)result[i].n_req,
              (double)result[i].n_miss / (double)result[i].n_req,
              (double)result[i].n_miss_byte / (double)result[i].n_req_byte);
+    if (result[i].n_req_byte > result[i].n_req) {
+      snprintf(output_str + strlen(output_str), 1024 - strlen(output_str),
+               ", byte miss ratio %.4lf\n", byte_miss_ratio);
+    } else if (result[i].total_cost > result[i].n_req) {
+      snprintf(output_str + strlen(output_str), 1024 - strlen(output_str),
+               ", cost saving ratio %.4lf\n", cost_saving_ratio);
+    } else {
+      snprintf(output_str + strlen(output_str), 1024 - strlen(output_str),
+               "\n");
+    }
+
     printf("%s", output_str);
     fprintf(output_file, "%s", output_str);
   }

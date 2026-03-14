@@ -82,6 +82,8 @@ typedef struct {
   int64_t n_req_byte;
   int64_t n_miss;
   int64_t n_miss_byte;
+  int64_t total_cost;
+  int64_t miss_cost;
 
   int64_t n_obj;
   int64_t occupied_byte;

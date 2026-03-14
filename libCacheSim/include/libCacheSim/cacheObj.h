@@ -75,7 +75,6 @@ typedef struct {
 typedef struct Belady_obj_metadata {
   void *pq_node;
   int64_t next_access_vtime;
-  int32_t compute_intensity;  // for BeladyCompute algorithm
 } Belady_obj_metadata_t;
 
 typedef struct {
@@ -145,10 +144,6 @@ typedef struct {
 } __attribute__((packed)) Sieve_obj_params_t;
 
 typedef struct {
-  int32_t compute_intensity;
-} GDSF_compute_obj_metadata_t;
-
-typedef struct {
   int64_t next_access_vtime;
   int32_t freq;
 } __attribute__((packed)) misc_metadata_t;
@@ -163,6 +158,9 @@ typedef struct cache_obj {
     struct cache_obj *prev;
     struct cache_obj *next;
   } queue;  // for LRU, FIFO, etc.
+
+  int32_t cost;  // the cost of computing or fetching this object, used by some
+                 // eviction algorithms
 #ifdef SUPPORT_TTL
   uint32_t exp_time;
 #endif
@@ -196,7 +194,6 @@ typedef struct cache_obj {
     S3FIFO_obj_metadata_t S3FIFO;
     Sieve_obj_params_t sieve;
     CAR_obj_metadata_t CAR;
-    GDSF_compute_obj_metadata_t GDSF_compute;
 
 #if defined(ENABLE_GLCACHE) && ENABLE_GLCACHE == 1
     GLCache_obj_metadata_t GLCache;
