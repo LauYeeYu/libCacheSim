@@ -64,7 +64,6 @@ static inline cache_t *create_cache(const char *trace_path,
       {"qdlp", QDLP_init},
       {"random", Random_init},
       {"RandomLRU", RandomLRU_init},
-      {"randomTwo", RandomTwo_init},
       {"s3-fifo", S3FIFO_init},
       {"s3-fifov0", S3FIFOv0_init},
       {"s3fifo", S3FIFO_init},
@@ -76,6 +75,9 @@ static inline cache_t *create_cache(const char *trace_path,
       {"slruv0", SLRUv0_init},
       {"twoq", TwoQ_init},
       {"wtinyLFU", WTinyLFU_init},
+
+      {"s3fifo_compute", S3FIFOCompute_init},
+      {"gdsf_compute", GDSF_compute_init},
 #ifdef ENABLE_3L_CACHE
       {"3LCache", ThreeLCache_init},
 #endif
@@ -103,6 +105,9 @@ static inline cache_t *create_cache(const char *trace_path,
   } else if (strcasecmp(eviction_algo, "hyperbolic") == 0) {
     cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
     cache = Hyperbolic_init(cc_params, eviction_params);
+  } else if (strcasecmp(eviction_algo, "random_compute") == 0) {
+    cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
+    cache = RandomCompute_init(cc_params, eviction_params);
   } else if (strcasecmp(eviction_algo, "tinyLFU") == 0) {
     if (eviction_params == NULL || eviction_params[0] == '\0') {
       cache = WTinyLFU_init(cc_params, NULL);
@@ -147,7 +152,7 @@ static inline cache_t *create_cache(const char *trace_path,
     }
     cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
     cache = BeladySize_init(cc_params, eviction_params);
-  } else if (strcasecmp(eviction_algo, "beladyCompute") == 0) {
+  } else if (strcasecmp(eviction_algo, "belady_compute") == 0) {
     if (strcasestr(trace_path, "oracleGeneral") == NULL &&
         strcasestr(trace_path, "lcs") == NULL) {
       WARN("beladyCompute is only supported for oracleGeneral and lcs trace\n");
