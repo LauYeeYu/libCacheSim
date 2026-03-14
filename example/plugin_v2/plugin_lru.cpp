@@ -26,8 +26,10 @@ class StandaloneLRU {
   std::unordered_map<obj_id_t, Node *> cache_map;
   Node *head;
   Node *tail;
+  uint64_t max_size;
 
-  StandaloneLRU() {
+  StandaloneLRU(uint64_t cache_size = 1024 * 1024 * 1024)  // default 1GB
+      : max_size(cache_size) {
     head = new Node();
     tail = new Node();
     head->next = tail;
@@ -40,6 +42,7 @@ class StandaloneLRU {
       head = head->next;
       delete temp;
     }
+    cache_map.clear();
   }
 
   void add_to_head(Node *node) {
@@ -71,9 +74,11 @@ class StandaloneLRU {
   }
 
   void cache_miss(obj_id_t obj_id, uint64_t obj_size) {
-    Node *new_node = new Node(obj_id, obj_size);
-    cache_map[obj_id] = new_node;
-    add_to_head(new_node);
+    if (obj_size < max_size) {
+      Node *new_node = new Node(obj_id, obj_size);
+      cache_map[obj_id] = new_node;
+      add_to_head(new_node);
+    }
   }
 
   obj_id_t cache_eviction() {
@@ -102,7 +107,7 @@ extern "C" {
 // implement the cache init hook
 void *cache_init_hook(const common_cache_params_t ccache_params) {
   // initialize the LRU cache
-  StandaloneLRU *lru_cache = new StandaloneLRU();
+  StandaloneLRU *lru_cache = new StandaloneLRU(ccache_params.cache_size);
   return lru_cache;
 }
 
@@ -128,7 +133,7 @@ obj_id_t cache_eviction_hook(void *data, const request_t *req) {
 }
 
 // implement the cache remove hook
-void cache_remove_hook(void *data, const obj_id_t obj_id) {
+void cache_remove_hook(void *data, obj_id_t obj_id) {
   // remove object from the cache
   StandaloneLRU *lru_cache = (StandaloneLRU *)data;
   lru_cache->cache_remove(obj_id);
