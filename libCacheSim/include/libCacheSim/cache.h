@@ -71,6 +71,10 @@ typedef int64_t (*cache_get_n_obj_func_ptr)(const cache_t *);
 
 typedef void (*cache_print_cache_func_ptr)(const cache_t *);
 
+// Function pointer for transforming compute intensity values
+// Used by compute-aware caching algorithms (e.g., GDSF_compute, S3FIFO_compute)
+typedef double (*compute_intensity_transform_func_ptr)(double raw_intensity);
+
 // #define EVICTION_AGE_ARRAY_SZE 40
 #define EVICTION_AGE_ARRAY_SZE 320
 #define EVICTION_AGE_LOG_BASE 1.08
@@ -119,6 +123,9 @@ struct cache {
   struct prefetcher *prefetcher;
 
   void *eviction_params;
+
+  // Callback for transforming compute intensity (used by compute-aware algorithms)
+  compute_intensity_transform_func_ptr compute_intensity_transform;
 
   // other name: logical_time, virtual_time, reference_count
   int64_t n_req; /* number of requests (used by some eviction algo) */

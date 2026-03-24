@@ -20,6 +20,11 @@ extern "C" {
 // #define EXACT_Belady 1
 static const char *DEFAULT_PARAMS = "n-sample=128";
 
+// Default compute intensity transform function (uses identity/no transform)
+static double default_compute_intensity_transform(double raw_intensity) {
+  return raw_intensity;
+}
+
 typedef struct {
   // how many samples to take at each eviction
   int n_sample;
@@ -74,6 +79,9 @@ cache_t *BeladyCompute_init(const common_cache_params_t ccache_params,
   BeladyCompute_params_t *params =
       (BeladyCompute_params_t *)malloc(sizeof(BeladyCompute_params_t));
   cache->eviction_params = params;
+
+  // Set default compute intensity transform function
+  cache->compute_intensity_transform = default_compute_intensity_transform;
 
   BeladyCompute_parse_params(cache, DEFAULT_PARAMS);
   if (cache_specific_params != NULL) {
@@ -185,6 +193,7 @@ struct hash_iter_user_data {
   int64_t curr_vtime;
   cache_obj_t *to_evict_obj;
   double max_score;
+  cache_t *cache;
 };
 
 static void hashtable_iter_Belady_compute(cache_obj_t *cache_obj,
@@ -200,7 +209,13 @@ static void hashtable_iter_Belady_compute(cache_obj_t *cache_obj,
     int64_t time_diff = cache_obj->Belady.next_access_vtime - iter_userdata->curr_vtime;
     int32_t compute_intensity = cache_obj->Belady.compute_intensity;
     if (compute_intensity <= 0) compute_intensity = 1; // avoid division by zero
-    obj_score = (double)time_diff / (double)compute_intensity;
+
+    // Apply compute intensity transform
+    double transformed_intensity = iter_userdata->cache->compute_intensity_transform != NULL
+        ? iter_userdata->cache->compute_intensity_transform((double)compute_intensity)
+        : (double)compute_intensity;
+
+    obj_score = (double)time_diff / transformed_intensity;
   }
 
   if (obj_score > iter_userdata->max_score) {
@@ -224,6 +239,7 @@ static cache_obj_t *BeladyCompute_to_evict(cache_t *cache, const request_t *req)
   iter_userdata.curr_vtime = cache->n_req;
   iter_userdata.max_score = 0.0;
   iter_userdata.to_evict_obj = NULL;
+  iter_userdata.cache = cache;
 
   hashtable_foreach(cache->hashtable, hashtable_iter_Belady_compute,
                     &iter_userdata);
@@ -245,15 +261,20 @@ static cache_obj_t *BeladyCompute_to_evict(cache_t *cache, const request_t *req)
       int64_t time_diff = sampled_obj->Belady.next_access_vtime - cache->n_req;
       int32_t compute_intensity = sampled_obj->Belady.compute_intensity;
       if (compute_intensity <= 0) compute_intensity = 1; // avoid division by zero
-      
+
+      // Apply compute intensity transform
+      double transformed_intensity = cache->compute_intensity_transform != NULL
+          ? cache->compute_intensity_transform((double)compute_intensity)
+          : (double)compute_intensity;
+
       if (time_diff <= 0) {
         sampled_obj_score = -DBL_MAX / 2;
       } else {
         // Use log to handle large numbers and avoid overflow
-        sampled_obj_score = log((double)time_diff) - log((double)compute_intensity);
+        sampled_obj_score = log((double)time_diff) - log(transformed_intensity);
       }
     }
-    
+
     if (obj_to_evict == NULL || obj_to_evict_score < sampled_obj_score) {
       obj_to_evict = sampled_obj;
       obj_to_evict_score = sampled_obj_score;

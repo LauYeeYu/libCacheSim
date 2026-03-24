@@ -19,6 +19,11 @@ extern "C" {
 // #define PROB_ADMISSION
 // #define USE_FILTER
 
+// Default compute intensity transform function (uses identity/no transform)
+static double default_compute_intensity_transform(double raw_intensity) {
+  return raw_intensity;
+}
+
 typedef struct {
   cache_t *small;
   cache_t *ghost;
@@ -129,6 +134,9 @@ cache_t *S3FIFOCompute_init(const common_cache_params_t ccache_params, const cha
   ccache_params_local.cache_size = main_size;
   params->main = FIFO_init(ccache_params_local, NULL);
 
+  // Set default compute intensity transform function
+  cache->compute_intensity_transform = default_compute_intensity_transform;
+
   snprintf(cache->cache_name, CACHE_NAME_ARRAY_LEN, "S3FIFOCompute-%.4lf-%d", params->small_size_ratio,
            params->move_to_main_threshold);
 
@@ -208,6 +216,7 @@ static bool S3FIFOCompute_get(cache_t *cache, const request_t *req) {
 // ***********************************************************************
 /**
  * Update the total compute intensity in main cache when adding or removing objects
+ * Note: This function stores RAW compute intensity (not transformed) for accurate tracking
  */
 static void update_main_cache_compute_intensity(S3FIFOCompute_params_t *params, const request_t *req, bool add) {
   double compute_intensity = req->features[0];
@@ -459,7 +468,16 @@ static void S3FIFOCompute_evict_main(cache_t *cache, const request_t *req) {
   // Use COMPUTE-INTENSITY-based logic for main cache eviction
   double obj_compute_intensity = obj_to_evict->S3FIFO.compute_intensity;
   double mean_compute_intensity_main = get_mean_compute_intensity_main(params);
-  double ratio = mean_compute_intensity_main / obj_compute_intensity;
+
+  // Apply compute intensity transform for eviction decision
+  double transformed_obj_intensity = cache->compute_intensity_transform != NULL
+      ? cache->compute_intensity_transform(obj_compute_intensity)
+      : obj_compute_intensity;
+  double transformed_mean_intensity = cache->compute_intensity_transform != NULL
+      ? cache->compute_intensity_transform(mean_compute_intensity_main)
+      : mean_compute_intensity_main;
+
+  double ratio = transformed_mean_intensity / transformed_obj_intensity;
 
   bool removed = main_q->remove(main_q, obj_to_evict->obj_id);
   DEBUG_ASSERT(removed);

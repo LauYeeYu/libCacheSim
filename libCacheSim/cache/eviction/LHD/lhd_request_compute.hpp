@@ -139,7 +139,11 @@ private:
     
     // Helper functions for LHD computation
     inline rank_t getHitDensity(const Tag& tag) {
-        return getClass(tag).hitDensities[getAge(tag)] * (rank_t)tag.compute_intensity;
+        // Apply compute intensity transform
+        double transformed_intensity = cache->compute_intensity_transform != NULL
+            ? cache->compute_intensity_transform(tag.compute_intensity)
+            : tag.compute_intensity;
+        return getClass(tag).hitDensities[getAge(tag)] * (rank_t)transformed_intensity;
     }
     
     inline Class& getClass(const Tag& tag) {

@@ -10,6 +10,11 @@ using namespace repl;
 extern "C" {
 #endif
 
+// Default compute intensity transform function (uses identity/no transform)
+static double default_compute_intensity_transform(double raw_intensity) {
+  return raw_intensity;
+}
+
 // NOTE: Since LHD uses internal data struct to reprensent cache_obj_t, to suit
 // the interface, we use a dummy pointer to represent the cache_obj_t.
 // Specifically, for find and insert, we return a dummy pointer when the object
@@ -100,8 +105,11 @@ cache_t *LHD_compute_init(const common_cache_params_t ccache_params,
     params->associativity = 32;
   }
 
-  params->LHD_compute_cache = static_cast<void *>( 
+  params->LHD_compute_cache = static_cast<void *>(
       new LHDCompute(params->associativity, params->admission, cache));
+
+  // Set default compute intensity transform function
+  cache->compute_intensity_transform = default_compute_intensity_transform;
 
   return cache;
 }

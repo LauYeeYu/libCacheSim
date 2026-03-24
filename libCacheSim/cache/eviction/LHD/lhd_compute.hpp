@@ -185,7 +185,11 @@ class LHDCompute {
   }
 
   inline rank_t getHitDensity(const Tag& tag) {
-    return getClass(tag).hitDensities[getAge(tag)] * tag.compute_intensity;
+    // Apply compute intensity transform
+    double transformed_intensity = cache->compute_intensity_transform != NULL
+        ? cache->compute_intensity_transform(tag.compute_intensity)
+        : tag.compute_intensity;
+    return getClass(tag).hitDensities[getAge(tag)] * transformed_intensity;
   }
 
   void reconfigure();

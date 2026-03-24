@@ -24,6 +24,11 @@ extern "C" {
 // ****                                                               ****
 // ***********************************************************************
 
+// Default compute intensity transform function (uses sqrt)
+static double default_compute_intensity_transform(double raw_intensity) {
+  return sqrt(raw_intensity);
+}
+
 cache_t *GDSF_compute_init(const common_cache_params_t ccache_params,
                    const char *cache_specific_params);
 static void GDSF_compute_free(cache_t *cache);
@@ -65,6 +70,9 @@ cache_t *GDSF_compute_init(const common_cache_params_t ccache_params,
   cache->evict = GDSF_compute_evict;
   cache->to_evict = GDSF_compute_to_evict;
   cache->remove = GDSF_compute_remove;
+
+  // Set default compute intensity transform function
+  cache->compute_intensity_transform = default_compute_intensity_transform;
 
   if (ccache_params.consider_obj_metadata) {
     // freq + priority
@@ -153,9 +161,12 @@ static cache_obj_t *GDSF_compute_find(cache_t *cache, const request_t *req,
     auto node = gdsf->pq_map[obj];
     gdsf->pq.erase(node);
 
-    double pri = gdsf->pri_last_evict + (double)(obj->misc.freq) * sqrt((double)(obj->GDSF_compute.compute_intensity));
-    // double pri = gdsf->pri_last_evict + (double)(obj->misc.freq) * obj->GDSF_compute.compute_intensity;
-    // double pri = gdsf->pri_last_evict + (double)(obj->misc.freq) * (double)(obj->GDSF_compute.compute_intensity) / (1000 + obj->GDSF_compute.compute_intensity);
+    // Apply compute intensity transform using callback function
+    double transformed_intensity = cache->compute_intensity_transform != NULL
+        ? cache->compute_intensity_transform((double)(obj->GDSF_compute.compute_intensity))
+        : (double)(obj->GDSF_compute.compute_intensity);
+
+    double pri = gdsf->pri_last_evict + (double)(obj->misc.freq) * transformed_intensity;
     eviction::pq_node_type new_node = {obj, pri, cache->n_req};
     gdsf->pq.insert(new_node);
     gdsf->pq_map[obj] = new_node;
