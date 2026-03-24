@@ -131,6 +131,7 @@ typedef struct {
   int64_t insertion_time;  // measured in number of objects inserted
   int64_t freq;
   int32_t main_insert_freq;
+  double compute_intensity;  // compute intensity for S3FIFOCompute algorithm
 } S3FIFO_obj_metadata_t;
 
 typedef struct {

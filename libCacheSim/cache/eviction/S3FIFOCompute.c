@@ -1,11 +1,11 @@
 //
 //  compute-intensity-aware S3-FIFO
-//  admit high compute intensity object with higher priority
+//  admit high compute intensity object with higher priority in main queue only
 //
 //  S3FIFOCompute.c
 //  libCacheSim
 //
-//  Created by Code Assistant on 2/6/26.
+//  Created by Code Assistant on 2/7/26.
 //  Copyright © 2026 Code Assistant. All rights reserved.
 //
 
@@ -35,6 +35,10 @@ typedef struct {
 
   bool has_evicted;
   request_t *req_local;
+
+  // Compute intensity tracking - only for main cache
+  double total_compute_intensity_main;
+  int64_t n_obj_in_main;
 } S3FIFOCompute_params_t;
 
 static const char *DEFAULT_CACHE_PARAMS = "small-size-ratio=0.10,ghost-size-ratio=0.90,move-to-main-threshold=1";
@@ -59,6 +63,14 @@ static void S3FIFOCompute_parse_params(cache_t *cache, const char *cache_specifi
 
 static void S3FIFOCompute_evict_fifo(cache_t *cache, const request_t *req);
 static void S3FIFOCompute_evict_main(cache_t *cache, const request_t *req);
+
+// Helper functions for compute intensity tracking (main cache only)
+static void update_main_cache_compute_intensity(S3FIFOCompute_params_t *params, const request_t *req, bool add);
+static double get_mean_compute_intensity_main(const S3FIFOCompute_params_t *params);
+
+// Helper functions for size-based logic (small/ghost queues)
+static void cal_mean_obj_size(cache_t *cache, double req_obj_size, double *mean_obj_size_in_small,
+                              double *mean_obj_size_in_main, double *mean_obj_size);
 
 // ***********************************************************************
 // ****                                                               ****
@@ -86,6 +98,10 @@ cache_t *S3FIFOCompute_init(const common_cache_params_t ccache_params, const cha
   memset(cache->eviction_params, 0, sizeof(S3FIFOCompute_params_t));
   S3FIFOCompute_params_t *params = (S3FIFOCompute_params_t *)cache->eviction_params;
   params->req_local = new_request();
+
+  // Initialize compute intensity tracking for main cache only
+  params->total_compute_intensity_main = 0.0;
+  params->n_obj_in_main = 0;
 
   S3FIFOCompute_parse_params(cache, DEFAULT_CACHE_PARAMS);
   if (cache_specific_params != NULL) {
@@ -162,14 +178,6 @@ static bool S3FIFOCompute_get(cache_t *cache, const request_t *req) {
 
   cache->n_req += 1;
 
-  // if (cache->n_req == 1397750 || cache->n_req == 24733818 || cache->n_req == 85580270) {
-  //   printf("cache size %ldMB, %ld MREQ, SSD write %.4lf + %.4lf + %.4lf=%.4lfGB\n", cache->cache_size / MiB,
-  //   cache->n_req / 1000000,
-  //          params->n_byte_admit_to_main / 1e9, params->n_byte_move_to_main / 1e9, params->n_byte_reinsert_to_main /
-  //          1e9, params->n_byte_admit_to_main / 1e9+params->n_byte_move_to_main / 1e9+params->n_byte_reinsert_to_main
-  //          / 1e9);
-  // }
-
   cache_obj_t *obj = cache->find(cache, req, true);
   bool cache_hit = (obj != NULL);
 
@@ -198,6 +206,36 @@ static bool S3FIFOCompute_get(cache_t *cache, const request_t *req) {
 // ****       developer facing APIs (used by cache developer)         ****
 // ****                                                               ****
 // ***********************************************************************
+/**
+ * Update the total compute intensity in main cache when adding or removing objects
+ */
+static void update_main_cache_compute_intensity(S3FIFOCompute_params_t *params, const request_t *req, bool add) {
+  double compute_intensity = req->features[0];
+  if (compute_intensity <= 0) compute_intensity = 1.0; // Default to 1.0 if invalid
+
+  if (add) {
+    params->total_compute_intensity_main += compute_intensity;
+    params->n_obj_in_main += 1;
+  } else {
+    params->total_compute_intensity_main -= compute_intensity;
+    params->n_obj_in_main -= 1;
+    // Ensure we don't go negative
+    if (params->total_compute_intensity_main < 0) params->total_compute_intensity_main = 0;
+    if (params->n_obj_in_main < 0) params->n_obj_in_main = 0;
+  }
+}
+
+/**
+ * Get the mean compute intensity of objects currently in main cache
+ */
+static double get_mean_compute_intensity_main(const S3FIFOCompute_params_t *params) {
+  if (params->n_obj_in_main == 0) return 1.0; // Default mean if no objects in main cache
+  return params->total_compute_intensity_main / params->n_obj_in_main;
+}
+
+/**
+ * Calculate mean object sizes (same as S3FIFOSize for small/ghost queue decisions)
+ */
 static void cal_mean_obj_size(cache_t *cache, double req_obj_size, double *mean_obj_size_in_small,
                               double *mean_obj_size_in_main, double *mean_obj_size) {
   S3FIFOCompute_params_t *params = (S3FIFOCompute_params_t *)cache->eviction_params;
@@ -211,8 +249,6 @@ static void cal_mean_obj_size(cache_t *cache, double req_obj_size, double *mean_
   double cache_n_obj = MAX(cache->get_n_obj(cache), 1e-8);
   double cache_byte = cache->get_occupied_byte(cache);
 
-  // For compute intensity variant, we use compute intensity from request
-  // but calculate mean object size as usual for backward compatibility
   if (mean_obj_size_in_small != NULL) {
     *mean_obj_size_in_small = small_q_byte / small_q_n_obj;
   }
@@ -253,8 +289,6 @@ static cache_obj_t *S3FIFOCompute_find(cache_t *cache, const request_t *req, con
 #ifdef USE_FILTER
     if (params->n_byte_admit_to_small - obj->S3FIFO.insertion_time > params->small->cache_size / 2) {
       obj->S3FIFO.freq += 1;
-      // } else {
-      //   params->small->get_occupied_byte(params->small)/10000000);
     }
 #else
     obj->S3FIFO.freq += 1;
@@ -288,29 +322,25 @@ static cache_obj_t *S3FIFOCompute_insert(cache_t *cache, const request_t *req) {
   cache_t *main_q = params->main;
   cache_t *ghost_q = params->ghost;
 
-  double mean_obj_size_in_small, mean_obj_size_in_main, mean_obj_size;
-  cal_mean_obj_size(cache, req->obj_size, &mean_obj_size_in_small, &mean_obj_size_in_main, &mean_obj_size);
-
   cache_obj_t *ghost_obj = ghost_q->find(ghost_q, req, false);
   assert(ghost_obj == NULL || ghost_obj->S3FIFO.freq > 0);
 
   if (ghost_obj != NULL) {
-    // we need to compare with the small queue, because the object has not had chance to accumulate enough hits in the
-    // main queue
-    // MODIFIED: Invert the size-based logic for compute intensity
-    // Original: ratio = req_obj_size / mean_obj_size_in_small
-    // Higher obj_size -> higher ratio -> harder to promote
-    // Modified: ratio = mean_obj_size_in_small / req_compute_intensity
-    // Higher compute_intensity -> lower ratio -> easier to promote
-    double compute_intensity = req->features[0];
-    if (compute_intensity <= 0) compute_intensity = 1.0; // Avoid division by zero
-    double ratio = mean_obj_size_in_small / compute_intensity;
+    // Use SIZE-BASED logic for admission from ghost to main/small
+    // This keeps the admission control clean and focused on frequency
+    double mean_obj_size_in_small, mean_obj_size_in_main, mean_obj_size;
+    cal_mean_obj_size(cache, req->obj_size, &mean_obj_size_in_small, &mean_obj_size_in_main, &mean_obj_size);
+    double ratio = (double)req->obj_size / mean_obj_size_in_small;
     
     if ((ghost_obj->S3FIFO.freq) / ratio >= params->move_to_main_threshold) {
       // insert to main
       params->n_byte_admit_to_main += req->obj_size;
       obj = main_q->insert(main_q, req);
       obj->S3FIFO.freq = 1;
+      obj->S3FIFO.compute_intensity = req->features[0];  // Store compute intensity for main cache
+      if (obj->S3FIFO.compute_intensity <= 0) obj->S3FIFO.compute_intensity = 1.0;
+      // Update compute intensity tracking for main cache only
+      update_main_cache_compute_intensity(params, req, true);
     } else {
       // insert to small FIFO
       params->n_byte_admit_to_small += req->obj_size;
@@ -319,36 +349,36 @@ static cache_obj_t *S3FIFOCompute_insert(cache_t *cache, const request_t *req) {
       // only keep the frequency when inserting into the small queue
       // the ghost frequency has not been updated
       obj->S3FIFO.freq = ghost_obj->S3FIFO.freq + 1;
+      // Don't store compute intensity in small queue - keep it clean
+      obj->S3FIFO.compute_intensity = 1.0; // Default value, not used
     }
     ghost_q->remove(ghost_q, req->obj_id);
   } else {
     int64_t small_q_byte = params->small->get_occupied_byte(params->small);
     int64_t small_q_cache_size = params->small->cache_size;
 
-    // if (!params->has_evicted && small_q_byte >= small_q_cache_size) {
-    //   params->n_byte_admit_to_main += req->obj_size;
-    //   obj = main_q->insert(main_q, req);
-    // } else {
-    // params->n_byte_admit_to_small += req->obj_size;
-    // obj = params->small->insert(params->small, req);
-    // obj->S3FIFO.insertion_time = params->n_byte_admit_to_small;
-    // }
-
     if (!params->has_evicted) {
       if (main_q->get_occupied_byte(main_q) + req->obj_size + cache->obj_md_size <= main_q->cache_size) {
         params->n_byte_admit_to_main += req->obj_size;
         obj = main_q->insert(main_q, req);
+        obj->S3FIFO.compute_intensity = req->features[0];  // Store compute intensity for main cache
+        if (obj->S3FIFO.compute_intensity <= 0) obj->S3FIFO.compute_intensity = 1.0;
+        update_main_cache_compute_intensity(params, req, true);
       } else if (small_q_byte + req->obj_size + cache->obj_md_size >= small_q_cache_size) {
         ERROR("both small and main queue are full, but we are not evicting\n");
       } else {
         params->n_byte_admit_to_small += req->obj_size;
         obj = params->small->insert(params->small, req);
         obj->S3FIFO.insertion_time = params->n_byte_admit_to_small;
+        // Don't store compute intensity in small queue - keep it clean
+        obj->S3FIFO.compute_intensity = 1.0; // Default value, not used
       }
     } else {
       params->n_byte_admit_to_small += req->obj_size;
       obj = params->small->insert(params->small, req);
       obj->S3FIFO.insertion_time = params->n_byte_admit_to_small;
+      // Don't store compute intensity in small queue - keep it clean
+      obj->S3FIFO.compute_intensity = 1.0; // Default value, not used
     }
 
     obj->S3FIFO.freq = 1;
@@ -372,7 +402,7 @@ static cache_obj_t *S3FIFOCompute_to_evict(cache_t *cache, const request_t *req)
   return NULL;
 }
 
-// evict from FIFO
+// evict from FIFO (use SIZE-based logic)
 static void S3FIFOCompute_evict_fifo(cache_t *cache, const request_t *req) {
   S3FIFOCompute_params_t *params = (S3FIFOCompute_params_t *)cache->eviction_params;
   cache_t *small_q = params->small;
@@ -389,15 +419,15 @@ static void S3FIFOCompute_evict_fifo(cache_t *cache, const request_t *req) {
   double mean_obj_size = cache_byte / cache_n_obj;
 
   int64_t obj_size = obj_to_evict->obj_size;
-  // MODIFIED: Apply compute intensity logic
-  double compute_intensity = req->features[0];
-  if (compute_intensity <= 0) compute_intensity = 1.0; // Avoid division by zero
-  double ratio = mean_obj_size / compute_intensity;
+  double ratio = (double)obj_size / mean_obj_size;  // SIZE-based logic for small queue
 
   if ((obj_to_evict->S3FIFO.freq) / ratio >= params->move_to_main_threshold) {
     params->n_byte_move_to_main += obj_to_evict->obj_size;
     cache_obj_t *new_obj = main_q->insert(main_q, params->req_local);
     new_obj->S3FIFO.freq = 1;
+    new_obj->S3FIFO.compute_intensity = obj_to_evict->S3FIFO.compute_intensity;  // Preserve compute intensity
+    // Update compute intensity tracking for main cache
+    update_main_cache_compute_intensity(params, params->req_local, true);
   } else {
     // insert to ghost
     if (params->ghost != NULL) {
@@ -405,12 +435,13 @@ static void S3FIFOCompute_evict_fifo(cache_t *cache, const request_t *req) {
       cache_obj_t *ghost_obj = params->ghost->find(params->ghost, params->req_local, false);
       ghost_obj->S3FIFO.freq = obj_to_evict->S3FIFO.freq;
     }
+    // No compute intensity to update since object leaves cache entirely
   }
 
   small_q->evict(small_q, params->req_local);
 }
 
-// evict from main cache
+// evict from main cache (use COMPUTE-INTENSITY-based logic)
 static void S3FIFOCompute_evict_main(cache_t *cache, const request_t *req) {
   S3FIFOCompute_params_t *params = (S3FIFOCompute_params_t *)cache->eviction_params;
   cache_t *small_q = params->small;
@@ -425,10 +456,10 @@ static void S3FIFOCompute_evict_main(cache_t *cache, const request_t *req) {
   copy_cache_obj_to_request(params->req_local, obj_to_evict);
   double mean_obj_size = cache_byte / cache_n_obj;
 
-  // MODIFIED: Apply compute intensity logic
-  double compute_intensity = req->features[0];
-  if (compute_intensity <= 0) compute_intensity = 1.0; // Avoid division by zero
-  double ratio = mean_obj_size / compute_intensity;
+  // Use COMPUTE-INTENSITY-based logic for main cache eviction
+  double obj_compute_intensity = obj_to_evict->S3FIFO.compute_intensity;
+  double mean_compute_intensity_main = get_mean_compute_intensity_main(params);
+  double ratio = mean_compute_intensity_main / obj_compute_intensity;
 
   bool removed = main_q->remove(main_q, obj_to_evict->obj_id);
   DEBUG_ASSERT(removed);
@@ -437,7 +468,12 @@ static void S3FIFOCompute_evict_main(cache_t *cache, const request_t *req) {
     cache_obj_t *new_obj = main_q->insert(main_q, params->req_local);
     // clock with 2-bit counter, 4 is better than 3
     new_obj->S3FIFO.freq = MIN(freq, 4) - 1;
+    new_obj->S3FIFO.compute_intensity = obj_compute_intensity;  // Preserve compute intensity
     params->n_byte_reinsert_to_main += new_obj->obj_size;
+    // No change to compute intensity tracking since object stays in main cache
+  } else {
+    // Object is actually evicted, update compute intensity tracking
+    update_main_cache_compute_intensity(params, params->req_local, false);
   }
 }
 
@@ -459,15 +495,8 @@ static void S3FIFOCompute_evict(cache_t *cache, const request_t *req) {
   cache_t *ghost_q = params->ghost;
 
   do {
-    // printf("req %ld size %ld cache size %ld/%ld + %ld/%ld = %ld, %ld left\n", req->obj_size / 1000, cache->n_req,
-    //        params->small->get_occupied_byte(params->small) / 1000, params->small->cache_size / 1000,
-    //        params->main->get_occupied_byte(params->main) / 1000, params->main->cache_size / 1000,
-    //        (cache->get_occupied_byte(cache) + req->obj_size + cache->obj_md_size) / 1000,
-    //        cache->cache_size / 1000 - cache->get_occupied_byte(cache) / 1000);
-
     if (main_q->get_occupied_byte(main_q) > main_q->cache_size || small_q->get_occupied_byte(small_q) == 0) {
       S3FIFOCompute_evict_main(cache, req);
-      // main_q->evict(main_q, req);
     } else {
       S3FIFOCompute_evict_fifo(cache, req);
     }
@@ -530,13 +559,10 @@ static bool S3FIFOCompute_can_insert(cache_t *cache, const request_t *req) {
   cache_t *main_q = params->main;
   cache_t *ghost_q = params->ghost;
 
+  // Use SIZE-based logic for admission decisions (keep it clean)
   double mean_obj_size_in_small, mean_obj_size_in_main, mean_obj_size;
   cal_mean_obj_size(cache, req->obj_size, &mean_obj_size_in_small, &mean_obj_size_in_main, &mean_obj_size);
-
-  // MODIFIED: Apply compute intensity logic for admission
-  double compute_intensity = req->features[0];
-  if (compute_intensity <= 0) compute_intensity = 1.0; // Avoid division by zero
-  double ratio = mean_obj_size_in_small / compute_intensity;
+  double ratio = (double)req->obj_size / mean_obj_size_in_small;
 
   cache_obj_t *ghost_obj = ghost_q->find(ghost_q, req, false);
 

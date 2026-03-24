@@ -83,6 +83,8 @@ set(eviction_sources_cpp
         eviction/LHD/LHD_Interface.cpp
         eviction/LHD/lhd_compute.cpp
         eviction/LHD/LHD_compute_interface.cpp
+        eviction/LHD/lhd_request_compute.cpp
+        eviction/LHD/LHDRequest_Interface.cpp
         )
 
 # LRB
