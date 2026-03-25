@@ -111,6 +111,7 @@ typedef struct {
   int64_t last_access_vtime;
   int64_t insertion_time;
   int32_t oracle_idx;
+  double decayed_freq;  // frequency with exponential temporal decay applied
 } Random_obj_metadata_t;
 
 typedef struct {

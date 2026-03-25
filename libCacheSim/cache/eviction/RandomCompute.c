@@ -20,6 +20,10 @@ extern "C" {
 #endif
 
 #define RANDOM_COMPUTE_N_SAMPLE 128
+// Decay constant for temporal decay of access counts
+// Higher value = slower decay (more weight on history)
+// Lower value = faster decay (more weight on recent behavior)
+#define RANDOM_COMPUTE_DECAY_CONSTANT 20000.0
 
 // ***********************************************************************
 // ****                                                               ****
@@ -119,7 +123,18 @@ static cache_obj_t *RandomCompute_find(cache_t *cache, const request_t *req,
                                        bool update_cache) {
   cache_obj_t *obj = cache_find_base(cache, req, update_cache);
 
-  if (obj != NULL) {
+  if (obj != NULL && update_cache) {
+    // Apply decay to existing frequency before incrementing
+    int64_t recency = cache->n_req - obj->Random.last_access_vtime;
+    if (recency > 0) {
+      double decay_factor = exp(-(double)recency / RANDOM_COMPUTE_DECAY_CONSTANT);
+      // Update frequency with decay: new_freq = old_freq * decay + 1
+      obj->Random.decayed_freq = obj->Random.decayed_freq * decay_factor + 1.0;
+    } else {
+      // If accessed in same time step, just increment
+      obj->Random.decayed_freq += 1.0;
+    }
+
     obj->Random.last_access_vtime = cache->n_req;
   }
 
@@ -140,6 +155,8 @@ static cache_obj_t *RandomCompute_insert(cache_t *cache, const request_t *req) {
   cache_obj_t *obj = cache_insert_base(cache, req);
 
   obj->Random.last_access_vtime = cache->n_req;
+  // Initialize decayed frequency to 1.0 for new insertions
+  obj->Random.decayed_freq = 1.0;
 
   return obj;
 }
@@ -155,8 +172,20 @@ static cache_obj_t *RandomCompute_insert(cache_t *cache, const request_t *req) {
  * @return the object to be evicted
  */
 static inline double _rc_cost(cache_t *cache, cache_obj_t *obj) {
-  return (double)obj->cost * (obj->misc.freq + 1) /
-         (cache->n_req - obj->Random.last_access_vtime + 1);
+  // Calculate recency (time since last access)
+  int64_t recency = cache->n_req - obj->Random.last_access_vtime;
+  if (recency < 1) recency = 1;
+
+  // Apply exponential decay to the stored frequency based on time since last update
+  // decay_factor = exp(-recency / DECAY_CONSTANT)
+  double decay_factor = exp(-(double)recency / RANDOM_COMPUTE_DECAY_CONSTANT);
+
+  // Current effective frequency with decay applied
+  double effective_freq = obj->Random.decayed_freq * decay_factor;
+
+  // Score = (effective_freq / recency) * cost
+  // Lower score means higher priority for eviction
+  return (double)obj->cost * effective_freq / (double)recency;
 }
 
 static cache_obj_t *RandomCompute_to_evict(cache_t *cache,
