@@ -60,6 +60,7 @@ set(eviction_sources_c
 
         eviction/BeladyCompute.c
         eviction/RandomCompute.c
+        eviction/RandomQuickDemotion.c
         eviction/S3FIFOCompute.c
 
         # these are sub-algorithms used by other algorithms
