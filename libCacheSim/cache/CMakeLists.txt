@@ -59,6 +59,7 @@ set(eviction_sources_c
         eviction/WTinyLFU.c
 
         eviction/BeladyCompute.c
+        eviction/RandomTwo.c
         eviction/RandomCompute.c
         eviction/RandomQuickDemotion.c
         eviction/S3FIFOCompute.c
@@ -80,6 +81,10 @@ set(eviction_sources_c
 set(eviction_sources_cpp
         eviction/cpp/LFU.cpp
         eviction/cpp/GDSF.cpp
+        eviction/cpp/prefixRadixTree.cpp
+        eviction/cpp/partialNodeCache.cpp
+        eviction/cpp/PartialNodeRandomCompute.cpp
+        eviction/cpp/PartialNodeRandomFreq.cpp
         eviction/cpp/GDSF_compute.cpp
         eviction/LHD/lhd.cpp
         eviction/LHD/LHD_Interface.cpp
