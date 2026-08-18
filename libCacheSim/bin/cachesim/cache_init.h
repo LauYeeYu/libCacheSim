@@ -110,9 +110,9 @@ static inline cache_t *create_cache(const char *trace_path,
   } else if (strcasecmp(eviction_algo, "random_compute") == 0) {
     cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
     cache = RandomCompute_init(cc_params, eviction_params);
-  } else if (strcasecmp(eviction_algo, "random_quick_demotion") == 0) {
+  } else if (strcasecmp(eviction_algo, "random_compute_small_queue") == 0) {
     cc_params.hashpower = MAX(cc_params.hashpower - 8, 16);
-    cache = RandomQuickDemotion_init(cc_params, eviction_params);
+    cache = RandomComputeSmallQueue_init(cc_params, eviction_params);
   } else if (strcasecmp(eviction_algo, "tinyLFU") == 0) {
     if (eviction_params == NULL || eviction_params[0] == '\0') {
       cache = WTinyLFU_init(cc_params, NULL);

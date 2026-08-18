@@ -61,7 +61,7 @@ set(eviction_sources_c
         eviction/BeladyCompute.c
         eviction/RandomTwo.c
         eviction/RandomCompute.c
-        eviction/RandomQuickDemotion.c
+        eviction/RandomComputeSmallQueue.c
         eviction/S3FIFOCompute.c
 
         # these are sub-algorithms used by other algorithms
@@ -85,6 +85,7 @@ set(eviction_sources_cpp
         eviction/cpp/partialNodeCache.cpp
         eviction/cpp/PartialNodeRandomCompute.cpp
         eviction/cpp/PartialNodeRandomFreq.cpp
+        eviction/cpp/PartialNodeRandomComputeSmallQueue.cpp
         eviction/cpp/GDSF_compute.cpp
         eviction/LHD/lhd.cpp
         eviction/LHD/LHD_Interface.cpp
