@@ -6,6 +6,7 @@
 - [Trace Analyzer](quickstart_traceAnalyzer.md)
 - [MRC Profiler](quickstart_mrcProfiler.md)
 - [Plugin System](quickstart_plugin.md)
+- [prefixsim: LLM prefix-cache simulator](../libCacheSim/bin/prefixsim/README.md)
 
 ## Advanced Usage
 - [Library Usage Guide](advanced_lib.md)
