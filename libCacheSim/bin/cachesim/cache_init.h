@@ -76,6 +76,12 @@ static inline cache_t *create_cache(const char *trace_path,
       {"twoq", TwoQ_init},
       {"wtinyLFU", WTinyLFU_init},
 
+      {"workloadaware", WorkloadAware_init},
+      {"kvcachewild", WorkloadAware_init},
+      {"asymcache", AsymCache_init},
+      {"msa", AsymCache_init},
+      {"asymcachetime", AsymCacheTime_init},
+
       {"s3fifo_compute", S3FIFOCompute_init},
       {"gdsf_compute", GDSF_compute_init},
       {"lhd_compute", LHD_compute_init},

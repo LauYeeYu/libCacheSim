@@ -196,6 +196,36 @@ static const cache_test_data_t test_data_truth[] = {
      .miss_cnt_true = {90043, 83978, 81482, 77727, 72611, 72059, 67836, 65739},
      .miss_byte_true = {4068758016, 3792818176, 3639756288, 3379609600,
                         3165339648, 3058814976, 2862775296, 2774183936}},
+    /* Published prefix-cache policies. Both consult per-request metadata that
+     * only prefixsim supplies, so under this driver they run in their
+     * documented single-class, internal-clock fallback: what these numbers pin
+     * is the core eviction machinery (the per-class LRU queues and head heap;
+     * the two piecewise-exponential segment heaps), not the prefix-cache
+     * behaviour, which prefixsim covers. */
+    {.cache_name = "WorkloadAware",
+     .hashpower = 20,
+     .req_cnt_true = 113872,
+     .req_byte_true = 4368040448,
+     .miss_cnt_true = {93374, 89783, 83572, 81722, 72494, 72104, 71972, 71704},
+     .miss_byte_true = {4214303232, 4061242368, 3778040320, 3660569600,
+                        3100927488, 3078128640, 3075403776, 3061662720}},
+    {.cache_name = "AsymCache",
+     .hashpower = 20,
+     .req_cnt_true = 113872,
+     .req_byte_true = 4368040448,
+     .miss_cnt_true = {92232, 88910, 87122, 82559, 77385, 74014, 69331, 63357},
+     .miss_byte_true = {4131499520, 3940749824, 3856896000, 3568462336,
+                        3297068544, 3091883520, 2834808832, 2520712704}},
+    /* Identical to AsymCache above, and necessarily so: this driver calls
+     * neither hook, so the wall clock has no source and both variants fall back
+     * to the same per-access block clock. prefixsim is where they diverge. */
+    {.cache_name = "AsymCacheTime",
+     .hashpower = 20,
+     .req_cnt_true = 113872,
+     .req_byte_true = 4368040448,
+     .miss_cnt_true = {92232, 88910, 87122, 82559, 77385, 74014, 69331, 63357},
+     .miss_byte_true = {4131499520, 3940749824, 3856896000, 3568462336,
+                        3297068544, 3091883520, 2834808832, 2520712704}},
 #if defined(ENABLE_3L_CACHE) && ENABLE_3L_CACHE == 1
     {.cache_name = "3LCache",
      .hashpower = 20,
@@ -386,6 +416,18 @@ static void test_WTinyLFU(gconstpointer user_data) {
 
 static void empty_test(gconstpointer user_data) { ; }
 
+static void test_WorkloadAware(gconstpointer user_data) {
+  test_cache_algorithm(user_data, &test_data_truth[25]);
+}
+
+static void test_AsymCache(gconstpointer user_data) {
+  test_cache_algorithm(user_data, &test_data_truth[26]);
+}
+
+static void test_AsymCacheTime(gconstpointer user_data) {
+  test_cache_algorithm(user_data, &test_data_truth[27]);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   srand(0);           // for reproducibility
@@ -436,6 +478,12 @@ int main(int argc, char *argv[]) {
 
   // Belady algorithms require reader that has next access information
   // and can only use oracleGeneral trace (which we're using)
+  g_test_add_data_func("/libCacheSim/cacheAlgo_WorkloadAware", reader,
+                       test_WorkloadAware);
+  g_test_add_data_func("/libCacheSim/cacheAlgo_AsymCache", reader,
+                       test_AsymCache);
+  g_test_add_data_func("/libCacheSim/cacheAlgo_AsymCacheTime", reader,
+                       test_AsymCacheTime);
   g_test_add_data_func("/libCacheSim/cacheAlgo_Belady", reader, test_Belady);
   g_test_add_data_func("/libCacheSim/cacheAlgo_BeladySize", reader,
                        test_BeladySize);
