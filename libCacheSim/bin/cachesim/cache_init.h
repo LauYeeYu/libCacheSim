@@ -80,7 +80,6 @@ static inline cache_t *create_cache(const char *trace_path,
       {"kvcachewild", WorkloadAware_init},
       {"asymcache", AsymCache_init},
       {"msa", AsymCache_init},
-      {"asymcachetime", AsymCacheTime_init},
 
       {"s3fifo_compute", S3FIFOCompute_init},
       {"gdsf_compute", GDSF_compute_init},
