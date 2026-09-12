@@ -396,7 +396,11 @@ static void test_SR_LRU(gconstpointer user_data) {
 
 #if defined(ENABLE_3L_CACHE) && ENABLE_3L_CACHE == 1
 static void test_3LCache(gconstpointer user_data) {
-  test_cache_algorithm(user_data, &test_data_truth[25]);
+  // Index must name the 3LCache row: test_cache_algorithm() builds the cache
+  // from test_data_truth[i].cache_name, so a wrong index silently tests a
+  // different algorithm rather than failing. This read 25 (WorkloadAware) until
+  // 2026-09-12, so 3LCache was never actually covered.
+  test_cache_algorithm(user_data, &test_data_truth[27]);
 }
 #endif /* ENABLE_3L_CACHE */
 
