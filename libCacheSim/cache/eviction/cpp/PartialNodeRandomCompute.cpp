@@ -2,9 +2,10 @@
 //
 // RandomCompute's score applied to node-sampled candidates: instead of drawing
 // n_sample blocks uniformly from the hash table, draw n_sample prefix-tree
-// NODES and consider only each node's deepest resident block. Evicting that
-// one block leaves the rest of the node cached, so a long shared prefix is
-// eaten from its private end inward instead of being punched full of holes.
+// NODES and consider only one resident block per node -- the shallowest by
+// default, the deepest under evict-from=tail. Evicting that one block leaves
+// the rest of the node cached, so a node is eaten from one end inward instead
+// of being punched full of holes.
 //
 // Everything except the score lives in PartialNodeCache.
 

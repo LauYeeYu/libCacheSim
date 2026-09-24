@@ -39,6 +39,33 @@ cache_obj_t *node_candidate(cache_t *cache, PartialNodeCache *impl,
 bool evict_small(cache_t *cache, PartialNodeCache *impl) {
   while (impl->small_head != nullptr) {
     cache_obj_t *victim = impl->small_head;
+
+    // kCost: promote everything in the window that earned it, then drop the
+    // lowest-scoring survivor instead of the oldest. Diagnostic only -- see
+    // PartialNodeCache::SmallEvict.
+    if (impl->small_evict == PartialNodeCache::SmallEvict::kCost) {
+      int64_t seen = 0;
+      double best = DBL_MAX;
+      cache_obj_t *pick = nullptr;
+      for (cache_obj_t *o = impl->small_head; o != nullptr;
+           o = o->queue.next) {
+        if (impl->small_window > 0 && seen >= impl->small_window) break;
+        ++seen;
+        if (static_cast<int>(o->misc.freq) >= impl->move_to_main_threshold) {
+          continue;  // promotable; the head walk below will take care of it
+        }
+        const double sc = impl->score(cache, o);
+        if (sc < best) {
+          best = sc;
+          pick = o;
+        }
+      }
+      if (pick != nullptr &&
+          static_cast<int>(impl->small_head->misc.freq) <
+              impl->move_to_main_threshold) {
+        victim = pick;
+      }
+    }
     const obj_id_t id = victim->obj_id;
     const int64_t size = victim->obj_size;
 
@@ -49,6 +76,8 @@ bool evict_small(cache_t *cache, PartialNodeCache *impl) {
       impl->small_bytes -= size;
       victim->Random.last_access_vtime = cache->n_req;
       impl->tree.mark_resident(id);
+      ++impl->n_promote;
+      impl->cost_promote += static_cast<double>(victim->cost);
       continue;
     }
 
@@ -63,6 +92,8 @@ bool evict_small(cache_t *cache, PartialNodeCache *impl) {
       ghost_req.valid = true;
       impl->ghost->get(impl->ghost, &ghost_req);
     }
+    ++impl->n_small_drop;
+    impl->cost_small_drop += static_cast<double>(victim->cost);
     cache_evict_base(cache, victim, true);
     return true;
   }
@@ -81,9 +112,66 @@ cache_obj_t *pick_victim(cache_t *cache);
 // cache_t vtable
 // ---------------------------------------------------------------------------
 
+/// Where blocks die and what they were worth. See PartialNodeCache's stats
+/// block for why this exists.
+void pn_print_stats(const cache_t *cache, const PartialNodeCache *impl) {
+  const double hits = static_cast<double>(impl->n_small_hit + impl->n_main_hit);
+  const double mean_admit =
+      impl->n_admit > 0 ? impl->cost_admit / impl->n_admit : 0.0;
+  const double mean_small_drop =
+      impl->n_small_drop > 0 ? impl->cost_small_drop / impl->n_small_drop : 0.0;
+  const double mean_main_evict =
+      impl->n_main_evict > 0 ? impl->cost_main_evict / impl->n_main_evict : 0.0;
+  // Mean small-queue residency, in block accesses (libCacheSim's n_req counts
+  // one per block, not per LLM request): a block is pushed out after about
+  // small_capacity further admissions, which arrive at n_small_admit/n_req.
+  const double admits_per_req =
+      cache->n_req > 0 ? static_cast<double>(impl->n_small_admit) / cache->n_req
+                       : 0.0;
+  const double residency_req =
+      admits_per_req > 0 ? impl->small_capacity / admits_per_req : 0.0;
+
+  printf(
+      "STATS algo=%s small_capacity=%lld admit=%lld small_admit=%lld "
+      "direct_admit=%lld promote=%lld promote_rate=%.4f small_drop=%lld "
+      "main_evict=%lld small_hit_share=%.4f small_residency_acc=%.0f "
+      "mean_cost_admit=%.1f mean_cost_small_admit=%.1f "
+      "mean_cost_direct_admit=%.1f mean_cost_promote=%.1f "
+      "mean_cost_small_drop=%.1f mean_cost_main_evict=%.1f\n",
+      cache->cache_name, static_cast<long long>(impl->small_capacity),
+      static_cast<long long>(impl->n_admit),
+      static_cast<long long>(impl->n_small_admit),
+      static_cast<long long>(impl->n_direct_admit),
+      static_cast<long long>(impl->n_promote),
+      impl->n_small_admit > 0
+          ? static_cast<double>(impl->n_promote) / impl->n_small_admit
+          : 0.0,
+      static_cast<long long>(impl->n_small_drop),
+      static_cast<long long>(impl->n_main_evict),
+      hits > 0 ? impl->n_small_hit / hits : 0.0, residency_req, mean_admit,
+      impl->n_small_admit > 0 ? impl->cost_small_admit / impl->n_small_admit
+                              : 0.0,
+      impl->n_direct_admit > 0 ? impl->cost_direct_admit / impl->n_direct_admit
+                              : 0.0,
+      impl->n_promote > 0 ? impl->cost_promote / impl->n_promote : 0.0,
+      mean_small_drop, mean_main_evict);
+}
+
 void pn_free(cache_t *cache) {
   PartialNodeCache *impl = impl_of(cache);
+  if (impl->print_stats) pn_print_stats(cache, impl);
+  if (impl->adaptive) {
+    fprintf(stderr,
+            "PN_ADAPT cache_size=%lld small_target=%.1f small_target_frac=%.4f "
+            "small_ghost_hit=%lld main_ghost_hit=%lld step=%.3f cost_weighted=%d\n",
+            (long long)cache->cache_size, impl->small_target,
+            impl->small_target / (double)cache->cache_size,
+            (long long)impl->n_small_ghost_hit,
+            (long long)impl->n_main_ghost_hit, impl->adaptive_step,
+            impl->adaptive_cost_weighted ? 1 : 0);
+  }
   if (impl->ghost != nullptr) impl->ghost->cache_free(impl->ghost);
+  if (impl->main_ghost != nullptr) impl->main_ghost->cache_free(impl->main_ghost);
   delete impl;
   cache->eviction_params = nullptr;
   cache_struct_free(cache);
@@ -93,13 +181,59 @@ bool pn_get(cache_t *cache, const request_t *req) {
   return cache_get_base(cache, req);
 }
 
+/**
+ * How far to move the probation boundary on a ghost hit.
+ *
+ * ARC's rule is delta = max(|other ghost| / |this ghost|, 1) -- a confidence
+ * scaling, one unit of cache per unit of evidence. Because this cache is scored
+ * on COMPUTE SAVINGS rather than hits, the default also scales by how expensive
+ * the returning block is relative to the running mean admitted cost: a deep
+ * block that was thrown away is worth more than a shallow one, and the boundary
+ * should move further for it.
+ */
+static double pn_adapt_delta(cache_t *cache, PartialNodeCache *impl,
+                             const request_t *req, bool from_small_ghost) {
+  const double b_small =
+      impl->ghost != nullptr
+          ? static_cast<double>(impl->ghost->get_occupied_byte(impl->ghost))
+          : 0.0;
+  const double b_main =
+      impl->main_ghost != nullptr
+          ? static_cast<double>(
+                impl->main_ghost->get_occupied_byte(impl->main_ghost))
+          : 0.0;
+  const double here = from_small_ghost ? b_small : b_main;
+  const double there = from_small_ghost ? b_main : b_small;
+  double delta = (here > 0.0 && there / here > 1.0) ? there / here : 1.0;
+  if (impl->adaptive_cost_weighted && impl->n_admit > 0) {
+    const double mean_cost = impl->cost_admit / static_cast<double>(impl->n_admit);
+    if (mean_cost > 0.0) {
+      double w = static_cast<double>(req->cost) / mean_cost;
+      if (w < 0.1) w = 0.1;
+      if (w > 10.0) w = 10.0;
+      delta *= w;
+    }
+  }
+  return delta * impl->adaptive_step;
+}
+
 cache_obj_t *pn_find(cache_t *cache, const request_t *req, bool update_cache) {
   PartialNodeCache *impl = impl_of(cache);
-  if (update_cache && impl->small_enabled()) impl->hit_on_ghost = false;
+  if (update_cache && impl->small_enabled()) {
+    impl->hit_on_ghost = false;
+    impl->hit_on_main_ghost = false;
+  }
 
   cache_obj_t *obj = cache_find_base(cache, req, update_cache);
   if (obj != nullptr) {
     if (update_cache) obj->Random.last_access_vtime = cache->n_req;
+    if (update_cache && impl->print_stats) {
+      if (impl->small_enabled() && !impl->tree.is_resident(obj->obj_id)) {
+        ++impl->n_small_hit;
+      } else {
+        ++impl->n_main_hit;
+      }
+    }
     return obj;
   }
 
@@ -108,6 +242,19 @@ cache_obj_t *pn_find(cache_t *cache, const request_t *req, bool update_cache) {
   if (update_cache && impl->small_enabled() && impl->ghost != nullptr &&
       impl->ghost->remove(impl->ghost, req->obj_id)) {
     impl->hit_on_ghost = true;
+    if (impl->adaptive) {
+      ++impl->n_small_ghost_hit;
+      impl->small_target =
+          std::min(impl->small_target + pn_adapt_delta(cache, impl, req, true),
+                   static_cast<double>(cache->cache_size));
+    }
+  } else if (update_cache && impl->adaptive && impl->main_ghost != nullptr &&
+             impl->main_ghost->remove(impl->main_ghost, req->obj_id)) {
+    impl->hit_on_main_ghost = true;
+    ++impl->n_main_ghost_hit;
+    impl->small_target =
+        std::max(impl->small_target - pn_adapt_delta(cache, impl, req, false),
+                 0.0);
   }
   return nullptr;
 }
@@ -117,6 +264,9 @@ cache_obj_t *pn_insert(cache_t *cache, const request_t *req) {
   cache_obj_t *obj = cache_insert_base(cache, req);
   obj->Random.last_access_vtime = cache->n_req;
 
+  ++impl->n_admit;
+  impl->cost_admit += static_cast<double>(obj->cost);
+
   if (!impl->small_enabled()) {
     impl->tree.mark_resident(obj->obj_id);
     return obj;
@@ -124,16 +274,28 @@ cache_obj_t *pn_insert(cache_t *cache, const request_t *req) {
 
   // Straight to main if the ghost vouched for it, or if the cache is still
   // filling and the small queue is already full.
+  const bool too_expensive_to_gate =
+      impl->small_bypass_mult > 0.0 && impl->n_admit > 1 &&
+      static_cast<double>(obj->cost) >
+          impl->small_bypass_mult * (impl->cost_admit / impl->n_admit);
+  const int64_t small_cap = impl->adaptive
+                                ? static_cast<int64_t>(impl->small_target)
+                                : impl->small_capacity;
   const bool to_main =
-      impl->hit_on_ghost ||
-      (!impl->has_evicted && impl->small_bytes >= impl->small_capacity);
+      impl->hit_on_ghost || impl->hit_on_main_ghost || too_expensive_to_gate ||
+      (!impl->has_evicted && impl->small_bytes >= small_cap);
   impl->hit_on_ghost = false;
+  impl->hit_on_main_ghost = false;
 
   if (to_main) {
     impl->tree.mark_resident(obj->obj_id);
+    ++impl->n_direct_admit;
+    impl->cost_direct_admit += static_cast<double>(obj->cost);
   } else {
     append_obj_to_tail(&impl->small_head, &impl->small_tail, obj);
     impl->small_bytes += obj->obj_size;
+    ++impl->n_small_admit;
+    impl->cost_small_admit += static_cast<double>(obj->cost);
   }
   return obj;
 }
@@ -153,6 +315,8 @@ int64_t evict_orphans(cache_t *cache, PartialNodeCache *impl, int64_t n) {
     cache_obj_t *obj = hashtable_find_obj_id(cache->hashtable, id);
     impl->tree.mark_evicted(id);
     if (obj == nullptr) continue;  // tree drifted; the id is gone either way
+    ++impl->n_main_evict;
+    impl->cost_main_evict += static_cast<double>(obj->cost);
     cache_evict_base(cache, obj, true);
     ++evicted;
   }
@@ -221,6 +385,16 @@ int64_t take_from_node(cache_t *cache, PartialNodeCache *impl,
     cache_obj_t *obj = hashtable_find_obj_id(cache->hashtable, id);
     if (obj == nullptr) continue;
     impl->tree.mark_evicted(id);
+    ++impl->n_main_evict;
+    impl->cost_main_evict += static_cast<double>(obj->cost);
+    if (impl->main_ghost != nullptr) {
+      request_t gr;
+      memset(&gr, 0, sizeof(gr));
+      gr.obj_id = id;
+      gr.obj_size = 1;
+      gr.valid = true;
+      impl->main_ghost->get(impl->main_ghost, &gr);
+    }
     cache_evict_base(cache, obj, true);
     ++took;
   }
@@ -248,7 +422,10 @@ int64_t pn_evict_n(cache_t *cache, const request_t * /*req*/, int64_t n) {
   // share. Only what survives promotion out of the queue is ever subject to
   // partial-node eviction below.
   while (impl->small_enabled() && evicted < n && impl->small_bytes > 0 &&
-         main_occupied(cache, impl) <= cache->cache_size - impl->small_capacity) {
+         (impl->adaptive
+              ? static_cast<double>(impl->small_bytes) > impl->small_target
+              : main_occupied(cache, impl) <=
+                    cache->cache_size - impl->small_capacity)) {
     if (!evict_small(cache, impl)) break;
     ++evicted;
   }
@@ -413,8 +590,29 @@ void pn_parse_params(cache_t *cache, const char *cache_specific_params) {
       impl->small_size_ratio = strtod(value, nullptr);
     } else if (strcasecmp(key, "ghost-size-ratio") == 0) {
       impl->ghost_size_ratio = strtod(value, nullptr);
+    } else if (strcasecmp(key, "adaptive") == 0) {
+      impl->adaptive = (atoi(value) != 0);
+    } else if (strcasecmp(key, "adaptive-step") == 0) {
+      impl->adaptive_step = strtod(value, nullptr);
+    } else if (strcasecmp(key, "adaptive-cost-weighted") == 0) {
+      impl->adaptive_cost_weighted = (atoi(value) != 0);
     } else if (strcasecmp(key, "move-to-main-threshold") == 0) {
       impl->move_to_main_threshold = static_cast<int>(strtol(value, nullptr, 0));
+    } else if (strcasecmp(key, "small-evict") == 0) {
+      if (strcasecmp(value, "fifo") == 0) {
+        impl->small_evict = PartialNodeCache::SmallEvict::kFifo;
+      } else if (strcasecmp(value, "cost") == 0) {
+        impl->small_evict = PartialNodeCache::SmallEvict::kCost;
+      } else {
+        ERROR("%s: small-evict must be fifo or cost, got %s\n",
+              cache->cache_name, value);
+      }
+    } else if (strcasecmp(key, "small-bypass-mult") == 0) {
+      impl->small_bypass_mult = strtod(value, nullptr);
+    } else if (strcasecmp(key, "small-window") == 0) {
+      impl->small_window = strtoll(value, nullptr, 0);
+    } else if (strcasecmp(key, "stats") == 0) {
+      impl->print_stats = strtol(value, nullptr, 0) != 0;
     } else if (strcasecmp(key, "micro-batch") == 0) {
       impl->micro_batch = strtoll(value, nullptr, 0);
     } else if (strcasecmp(key, "print") == 0) {
@@ -426,7 +624,8 @@ void pn_parse_params(cache_t *cache, const char *cache_specific_params) {
     } else {
       ERROR("%s does not have parameter %s, support n-sample, evict-from, "
             "eviction-mode, micro-batch, small-size-ratio, "
-            "ghost-size-ratio, move-to-main-threshold\n",
+            "ghost-size-ratio, move-to-main-threshold, small-evict, "
+            "small-window, small-bypass-mult, stats\n",
             cache->cache_name, key);
     }
   }
@@ -457,10 +656,20 @@ cache_t *partial_node_cache_init(const char *cache_name,
     pn_parse_params(cache, cache_specific_params);
   }
 
+  // adaptive=1 runs the queue whatever small-size-ratio says: the ratio only
+  // sets where the boundary STARTS, and 0 would mean "no queue at all".
+  if (impl->adaptive && impl->small_size_ratio <= 0.0) {
+    impl->small_size_ratio = 0.10;
+  }
+
   if (impl->small_size_ratio > 0.0) {
     impl->small_capacity =
         static_cast<int64_t>(ccache_params.cache_size * impl->small_size_ratio);
     if (impl->small_capacity < 1) impl->small_capacity = 1;
+    impl->small_target = static_cast<double>(impl->small_capacity);
+    // With the boundary moving, small_capacity must not also cap the queue --
+    // it only gates small_enabled() from here on.
+    if (impl->adaptive) impl->small_capacity = ccache_params.cache_size;
 
     const int64_t ghost_capacity =
         static_cast<int64_t>(ccache_params.cache_size * impl->ghost_size_ratio);
@@ -469,6 +678,13 @@ cache_t *partial_node_cache_init(const char *cache_name,
       ghost_params.cache_size = ghost_capacity;
       impl->ghost = FIFO_init(ghost_params, nullptr);
       snprintf(impl->ghost->cache_name, CACHE_NAME_ARRAY_LEN, "FIFO-ghost");
+      if (impl->adaptive) {
+        common_cache_params_t mg_params = ccache_params;
+        mg_params.cache_size = ghost_capacity;
+        impl->main_ghost = FIFO_init(mg_params, nullptr);
+        snprintf(impl->main_ghost->cache_name, CACHE_NAME_ARRAY_LEN,
+                 "FIFO-main-ghost");
+      }
     }
   }
   return cache;

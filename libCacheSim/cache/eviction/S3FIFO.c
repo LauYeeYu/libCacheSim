@@ -48,10 +48,60 @@ typedef struct {
 
   bool has_evicted;
   request_t *req_local;
+
+  /* ---- ARC-style adaptive probation boundary (off unless adaptive=1) ----
+   * Stock S3FIFO hard-codes the small queue at 10% of the cache and keeps a
+   * ghost only for what the SMALL queue drops, so it never sees evidence that
+   * the MAIN set is the one starved.  With adaptive=1 we add the missing
+   * second ghost and move a soft boundary `small_target` between the two,
+   * exactly the way ARC moves p between T1 and T2:
+   *   hit in the small ghost  -> probation was too small -> small_target += d
+   *   hit in the main  ghost  -> main was too small      -> small_target -= d
+   * The queues themselves stay S3FIFO's (FIFO small with lazy freq>=threshold
+   * promotion, CLOCK main) -- only the sizing rule is borrowed. */
+  bool adaptive;
+  /* Which rule moves small_target.
+   *   0 arc      -- ARC's two-ghost rule (needs main_ghost_fifo)
+   *   1 witness  -- NO main ghost. Grow on a small-ghost hit; shrink when MAIN
+   *                 evicts a block that was hit during its main residency.
+   *                 A prospective witness ("we knew it was useful") replaces
+   *                 ARC's retrospective one ("it came back"), at 1 bit/block.
+   *   2 density  -- NO ghost needed. Move toward whichever tier has the higher
+   *                 hits-per-byte over the last cache-size worth of accesses.
+   *   4 split    -- NO main ghost. Same signal as depth, but the threshold is
+   *                 the ghost's MIDPOINT, not small_target: a hit in the ghost's
+   *                 front half means a modestly bigger probation catches it
+   *                 (grow), a hit in the back half means the block needs
+   *                 main-style retention (shrink). Two-sided and balanced by
+   *                 construction -- the closest single-ghost analogue of ARC's
+   *                 two-ghost balance -- and with no absorbing state, which is
+   *                 exactly what kills mode 3.
+   *   5 witbal   -- witness, with ARC's rate normalisation: each event moves the
+   *                 boundary by max(count of the OTHER event / count of this
+   *                 one, 1), so a rare shrink signal still balances a frequent
+   *                 grow signal. Mode 1 runs away on traceB without this.
+   *   3 depth    -- NO main ghost. Use WHERE in the small ghost a hit lands:
+   *                 shallow (came back soon after leaving probation) means a
+   *                 slightly bigger probation would have caught it -> grow;
+   *                 deep means probation was never going to hold it and the
+   *                 space belongs to main -> shrink. One threshold, no constants. */
+  int adapt_mode;
+  bool main_ghost_on;   /* second ghost without the moving boundary */
+  int64_t ghost_ins_seq;        /* depth mode: ghost insertions so far */
+  double h_small, h_main;       /* density mode: decaying per-tier hit counts */
+  int64_t density_countdown;
+  int64_t n_witness_shrink;
+  cache_t *main_ghost_fifo;
+  double small_target;        /* bytes; the adaptive analogue of ARC's p */
+  double adaptive_step;       /* damping on the ARC delta, 1.0 = ARC's own */
+  bool hit_on_main_ghost;
+  int64_t n_small_ghost_hit;
+  int64_t n_main_ghost_hit;
 } S3FIFO_params_t;
 
 static const char *DEFAULT_CACHE_PARAMS =
-    "small-size-ratio=0.10,ghost-size-ratio=0.90,move-to-main-threshold=2";
+    "small-size-ratio=0.10,ghost-size-ratio=0.90,move-to-main-threshold=2,"
+    "adaptive=0,adaptive-step=1.0,main-ghost=0,adapt-mode=arc";
 
 // ***********************************************************************
 // ****                                                               ****
@@ -143,8 +193,31 @@ cache_t *S3FIFO_init(const common_cache_params_t ccache_params,
   ccache_params_local.cache_size = main_fifo_size;
   params->main_fifo = FIFO_init(ccache_params_local, NULL);
 
-  snprintf(cache->cache_name, CACHE_NAME_ARRAY_LEN, "S3FIFO-%.4lf-%d",
-           params->small_size_ratio, params->move_to_main_threshold);
+  params->small_target = (double)small_fifo_size;
+  params->hit_on_main_ghost = false;
+  params->density_countdown = ccache_params.cache_size;
+  params->main_ghost_fifo = NULL;
+  if (params->adaptive) {
+    /* The split is enforced by small_target from here on, so neither sub-cache
+     * may impose its own cap -- give both the full size. */
+    params->small_fifo->cache_size = ccache_params.cache_size;
+    params->main_fifo->cache_size = ccache_params.cache_size;
+  }
+  if (((params->adaptive && params->adapt_mode == 0) || params->main_ghost_on) &&
+      ghost_fifo_size > 0) {
+    ccache_params_local.cache_size = ghost_fifo_size;
+    params->main_ghost_fifo = FIFO_init(ccache_params_local, NULL);
+    snprintf(params->main_ghost_fifo->cache_name, CACHE_NAME_ARRAY_LEN,
+             "FIFO-main-ghost");
+  }
+
+  if (params->adaptive) {
+    snprintf(cache->cache_name, CACHE_NAME_ARRAY_LEN, "S3FIFOAdaptive-%.4lf-%d",
+             params->small_size_ratio, params->move_to_main_threshold);
+  } else {
+    snprintf(cache->cache_name, CACHE_NAME_ARRAY_LEN, "S3FIFO-%.4lf-%d",
+             params->small_size_ratio, params->move_to_main_threshold);
+  }
 
   return cache;
 }
@@ -156,10 +229,25 @@ cache_t *S3FIFO_init(const common_cache_params_t ccache_params,
  */
 static void S3FIFO_free(cache_t *cache) {
   S3FIFO_params_t *params = (S3FIFO_params_t *)cache->eviction_params;
+  if (params->adaptive || params->main_ghost_on) {
+    fprintf(stderr,
+            "S3FIFO_ADAPT cache_size=%lld small_target=%.1f small_target_frac=%.4f "
+            "small_ghost_hit=%lld main_ghost_hit=%lld witness_shrink=%lld "
+            "mode=%d step=%.3f\n",
+            (long long)cache->cache_size, params->small_target,
+            params->small_target / (double)cache->cache_size,
+            (long long)params->n_small_ghost_hit,
+            (long long)params->n_main_ghost_hit,
+            (long long)params->n_witness_shrink, params->adapt_mode,
+            params->adaptive_step);
+  }
   free_request(params->req_local);
   params->small_fifo->cache_free(params->small_fifo);
   if (params->ghost_fifo != NULL) {
     params->ghost_fifo->cache_free(params->ghost_fifo);
+  }
+  if (params->main_ghost_fifo != NULL) {
+    params->main_ghost_fifo->cache_free(params->main_ghost_fifo);
   }
   params->main_fifo->cache_free(params->main_fifo);
   free(cache->eviction_params);
@@ -230,21 +318,118 @@ static cache_obj_t *S3FIFO_find(cache_t *cache, const request_t *req,
 
   /* update cache is true from now */
   params->hit_on_ghost = false;
+  params->hit_on_main_ghost = false;
   cache_obj_t *obj = params->small_fifo->find(params->small_fifo, req, true);
   if (obj != NULL) {
     obj->S3FIFO.freq += 1;
+    if (params->adaptive && params->adapt_mode == 2) params->h_small += 1.0;
     return obj;
   }
 
+  int64_t ghost_depth = -1;
+  if (params->ghost_fifo != NULL && params->adaptive &&
+      (params->adapt_mode == 3 || params->adapt_mode == 4)) {
+    /* depth mode needs the ghost position, so read before removing */
+    cache_obj_t *g = params->ghost_fifo->find(params->ghost_fifo, req, false);
+    if (g != NULL) ghost_depth = params->ghost_ins_seq - g->S3FIFO.insertion_time;
+  }
   if (params->ghost_fifo != NULL &&
       params->ghost_fifo->remove(params->ghost_fifo, req->obj_id)) {
     // if object in ghost_fifo, remove will return true
     params->hit_on_ghost = true;
+    params->n_small_ghost_hit++;
+    if (params->adaptive && params->adapt_mode == 1) {
+      /* witness: probation lost a block that came back -> grow it */
+      params->small_target = MIN(params->small_target + params->adaptive_step,
+                                 (double)cache->cache_size);
+    } else if (params->adaptive && params->adapt_mode == 5) {
+      /* witbal: rate-normalised grow step */
+      const double ng = (double)(params->n_small_ghost_hit);
+      const double ns = (double)(params->n_witness_shrink);
+      double d = (ng > 0 && ns / ng > 1.0) ? ns / ng : 1.0;
+      params->small_target = MIN(params->small_target + d * params->adaptive_step,
+                                 (double)cache->cache_size);
+    } else if (params->adaptive && params->adapt_mode == 4) {
+      /* split: front half of the ghost -> grow, back half -> shrink */
+      const double half =
+          0.5 * (double)params->ghost_fifo->get_occupied_byte(params->ghost_fifo);
+      const double d = params->adaptive_step;
+      if (ghost_depth >= 0 && (double)ghost_depth < half) {
+        params->small_target = MIN(params->small_target + d,
+                                   (double)cache->cache_size);
+      } else {
+        params->small_target = MAX(params->small_target - d, 0.0);
+      }
+    } else if (params->adaptive && params->adapt_mode == 3) {
+      /* depth: shallow -> a slightly bigger probation catches it; deep -> the
+       * block needs main-style retention, so hand the space to main. */
+      const double d = params->adaptive_step;
+      if (ghost_depth >= 0 && (double)ghost_depth < params->small_target) {
+        params->small_target = MIN(params->small_target + d,
+                                   (double)cache->cache_size);
+      } else {
+        params->small_target = MAX(params->small_target - d, 0.0);
+      }
+    }
+    if (params->adaptive && params->adapt_mode == 0) {
+      /* ARC case II: the block died in probation and came back -> grow it. */
+      const double b1 = (double)params->ghost_fifo->get_occupied_byte(
+          params->ghost_fifo);
+      const double b2 =
+          params->main_ghost_fifo != NULL
+              ? (double)params->main_ghost_fifo->get_occupied_byte(
+                    params->main_ghost_fifo)
+              : 0.0;
+      double delta = (b1 > 0 && b2 / b1 > 1.0) ? b2 / b1 : 1.0;
+      delta *= params->adaptive_step;
+      params->small_target = MIN(params->small_target + delta,
+                                 (double)cache->cache_size);
+    }
+  } else if (params->main_ghost_fifo != NULL &&
+             params->main_ghost_fifo->remove(params->main_ghost_fifo,
+                                             req->obj_id)) {
+    /* ARC case III: the block was pushed out of MAIN and came back -> the
+     * protected set is the starved one, so shrink probation. */
+    params->hit_on_main_ghost = true;
+    params->n_main_ghost_hit++;
+    if (params->adaptive) {
+    const double b1 =
+        params->ghost_fifo != NULL
+            ? (double)params->ghost_fifo->get_occupied_byte(params->ghost_fifo)
+            : 0.0;
+    const double b2 = (double)params->main_ghost_fifo->get_occupied_byte(
+        params->main_ghost_fifo);
+    double delta = (b2 > 0 && b1 / b2 > 1.0) ? b1 / b2 : 1.0;
+    delta *= params->adaptive_step;
+    params->small_target = MAX(params->small_target - delta, 0.0);
+    }
   }
 
   obj = params->main_fifo->find(params->main_fifo, req, true);
   if (obj != NULL) {
     obj->S3FIFO.freq += 1;
+    obj->S3FIFO.main_insert_freq = 1;  /* sticky "was useful in main" witness */
+    if (params->adaptive && params->adapt_mode == 2) params->h_main += 1.0;
+  }
+
+  /* density mode: every cache-size worth of accesses, move the boundary toward
+   * whichever tier is currently earning more hits per byte, then decay. */
+  if (params->adaptive && params->adapt_mode == 2 &&
+      --params->density_countdown <= 0) {
+    params->density_countdown = cache->cache_size;
+    const double s_bytes = MAX(params->small_target, 1.0);
+    const double m_bytes = MAX((double)cache->cache_size - params->small_target, 1.0);
+    const double ds = params->h_small / s_bytes;
+    const double dm = params->h_main / m_bytes;
+    const double nudge = params->adaptive_step * (double)cache->cache_size * 0.02;
+    if (ds > dm) {
+      params->small_target = MIN(params->small_target + nudge,
+                                 (double)cache->cache_size);
+    } else if (dm > ds) {
+      params->small_target = MAX(params->small_target - nudge, 0.0);
+    }
+    params->h_small *= 0.5;
+    params->h_main *= 0.5;
   }
 
   return obj;
@@ -268,22 +453,31 @@ static cache_obj_t *S3FIFO_insert(cache_t *cache, const request_t *req) {
   cache_t *small_fifo = params->small_fifo;
   cache_t *main_fifo = params->main_fifo;
 
-  if (params->hit_on_ghost) {
+  if (params->hit_on_ghost || params->hit_on_main_ghost) {
     /* insert into main FIFO */
     params->hit_on_ghost = false;
+    params->hit_on_main_ghost = false;
     obj = main_fifo->insert(main_fifo, req);
+    obj->S3FIFO.main_insert_freq = 0;
   } else {
     /* insert into small fifo */
     // NOTE: Inserting an object whose size equals the size of small fifo is
     // NOT allowed. Doing so would completely fill the small fifo, causing all
     // objects in small fifo to be evicted. This scenario may occur
     // when using a tiny cache size.
-    if (req->obj_size >= small_fifo->cache_size) {
+    const int64_t small_guard = params->adaptive
+                                    ? (int64_t)params->small_target
+                                    : small_fifo->cache_size;
+    if (small_guard > 0 && req->obj_size >= small_guard &&
+        !params->adaptive) {
       return NULL;
     }
 
+    const int64_t small_cap =
+        params->adaptive ? (int64_t)params->small_target
+                         : small_fifo->cache_size;
     if (!params->has_evicted &&
-        small_fifo->get_occupied_byte(small_fifo) >= small_fifo->cache_size) {
+        small_fifo->get_occupied_byte(small_fifo) >= small_cap) {
       obj = main_fifo->insert(main_fifo, req);
     } else {
       obj = small_fifo->insert(small_fifo, req);
@@ -329,6 +523,12 @@ static void S3FIFO_evict_small(cache_t *cache, const request_t *req) {
       // insert to ghost
       if (ghost_fifo != NULL) {
         ghost_fifo->get(ghost_fifo, params->req_local);
+        if (params->adaptive &&
+            (params->adapt_mode == 3 || params->adapt_mode == 4)) {
+          cache_obj_t *g =
+              ghost_fifo->find(ghost_fifo, params->req_local, false);
+          if (g != NULL) g->S3FIFO.insertion_time = ++params->ghost_ins_seq;
+        }
       }
       has_evicted = true;
     }
@@ -349,6 +549,7 @@ static void S3FIFO_evict_main(cache_t *cache, const request_t *req) {
     DEBUG_ASSERT(obj_to_evict != NULL);
     int freq = obj_to_evict->S3FIFO.freq;
     copy_cache_obj_to_request(params->req_local, obj_to_evict);
+    const int32_t witness = obj_to_evict->S3FIFO.main_insert_freq;
     if (freq >= 1) {
       // we need to evict first because the object to insert has the same obj_id
       main_fifo->remove(main_fifo, obj_to_evict->obj_id);
@@ -357,10 +558,27 @@ static void S3FIFO_evict_main(cache_t *cache, const request_t *req) {
       cache_obj_t *new_obj = main_fifo->insert(main_fifo, params->req_local);
       // clock with 2-bit counter
       new_obj->S3FIFO.freq = MIN(freq, 3) - 1;
+      new_obj->S3FIFO.main_insert_freq = witness;  /* carry the witness across */
 
     } else {
       bool removed = main_fifo->remove(main_fifo, obj_to_evict->obj_id);
       DEBUG_ASSERT(removed);
+      if (params->main_ghost_fifo != NULL) {
+        params->main_ghost_fifo->get(params->main_ghost_fifo,
+                                     params->req_local);
+      }
+      if (params->adaptive && params->adapt_mode == 5 && witness) {
+        const double ng = (double)(params->n_small_ghost_hit);
+        const double ns = (double)(params->n_witness_shrink);
+        double d = (ns > 0 && ng / ns > 1.0) ? ng / ns : 1.0;
+        params->small_target = MAX(params->small_target - d * params->adaptive_step, 0.0);
+        params->n_witness_shrink++;
+      } else if (params->adaptive && params->adapt_mode == 1 && witness) {
+        /* main was forced to give up a block it had served -> main is starved */
+        params->small_target = MAX(params->small_target - params->adaptive_step,
+                                   0.0);
+        params->n_witness_shrink++;
+      }
 
       has_evicted = true;
     }
@@ -412,8 +630,20 @@ static void S3FIFO_evict_once(cache_t *cache, const request_t *req) {
   cache_t *small_fifo = params->small_fifo;
   cache_t *main_fifo = params->main_fifo;
 
-  if (main_fifo->get_occupied_byte(main_fifo) > main_fifo->cache_size ||
-      small_fifo->get_occupied_byte(small_fifo) == 0) {
+  if (params->adaptive) {
+    /* ARC's REPLACE, with small_target playing the role of p. */
+    const int64_t small_occ = small_fifo->get_occupied_byte(small_fifo);
+    const int64_t main_occ = main_fifo->get_occupied_byte(main_fifo);
+    const bool take_small =
+        (small_occ > 0 && (double)small_occ > params->small_target) ||
+        main_occ == 0;
+    if (take_small) {
+      S3FIFO_evict_small(cache, req);
+    } else {
+      S3FIFO_evict_main(cache, req);
+    }
+  } else if (main_fifo->get_occupied_byte(main_fifo) > main_fifo->cache_size ||
+             small_fifo->get_occupied_byte(small_fifo) == 0) {
     S3FIFO_evict_main(cache, req);
   } else {
     S3FIFO_evict_small(cache, req);
@@ -503,6 +733,20 @@ static void S3FIFO_parse_params(cache_t *cache,
       params->ghost_size_ratio = strtod(value, NULL);
     } else if (strcasecmp(key, "move-to-main-threshold") == 0) {
       params->move_to_main_threshold = atoi(value);
+    } else if (strcasecmp(key, "adaptive") == 0) {
+      params->adaptive = (atoi(value) != 0);
+    } else if (strcasecmp(key, "main-ghost") == 0) {
+      params->main_ghost_on = (atoi(value) != 0);
+    } else if (strcasecmp(key, "adapt-mode") == 0) {
+      if (strcasecmp(value, "arc") == 0) params->adapt_mode = 0;
+      else if (strcasecmp(value, "witness") == 0) params->adapt_mode = 1;
+      else if (strcasecmp(value, "density") == 0) params->adapt_mode = 2;
+      else if (strcasecmp(value, "depth") == 0) params->adapt_mode = 3;
+      else if (strcasecmp(value, "split") == 0) params->adapt_mode = 4;
+      else if (strcasecmp(value, "witbal") == 0) params->adapt_mode = 5;
+      else { ERROR("unknown adapt-mode %s\n", value); exit(1); }
+    } else if (strcasecmp(key, "adaptive-step") == 0) {
+      params->adaptive_step = strtod(value, NULL);
     } else if (strcasecmp(key, "print") == 0) {
       printf("parameters: %s\n", S3FIFO_current_params(params));
       exit(0);

@@ -167,14 +167,19 @@ The partial-node algorithms take that batch in one of two modes, set with
 
 | mode | chunk taken from the winning node |
 |---|---|
-| `drain` (default) | the whole remaining deficit |
-| `micro` | at most `micro-batch` blocks (default 64), then re-sample and re-score |
+| `drain` | the whole remaining deficit |
+| `micro` (default) | at most `micro-batch` blocks (default 64), then re-sample and re-score |
 
-On `qwen_coder` they land within 0.002 of each other at every cache size, so the
-cheaper mode is the better default: `drain` runs in 3.8s against `micro`'s 4.3s
-at batch 64, 8.3s at batch 8, and 37s at batch 1. Chunk size is close to free
-here -- what matters is `n-sample`, where 128 buys ~0.9 points of hit ratio over
-32 and saturates by 512.
+`micro` is the default because it is what the vLLM prototype does, and the two
+modes are not always interchangeable. On `qwen_coder` they land within 0.002 of
+each other at every cache size, and `drain` is the cheaper of the two: 3.8s
+against `micro`'s 4.3s at batch 64, 8.3s at batch 8, and 37s at batch 1. But on
+the fi-new trace at 32k blocks with the qwen3coder cost model,
+`partial_node_random_compute` scores 0.8605 compute savings under `micro` and
+only 0.8537 under `drain` -- draining a whole deficit out of one node evicts
+blocks the score never got to look at. Chunk size is otherwise close to free;
+`n-sample` matters more, where 128 buys ~0.9 points of hit ratio over 32 and
+saturates by 512.
 
 **Knowing the victim.** The loop needs the identity of each evicted object.
 `cache_evict_base()` already calls `prefetcher->handle_evict` on every genuine
@@ -365,6 +370,7 @@ signal the qwen trace carries.
 | `uniform` (default) | `1` | Compute saving ratio equals block hit ratio. |
 | `position` | `pos + 1` | Blocks that must be prefilled from the root to reconstruct this one. Matches the `compute` field written into `.lcsllm` traces. |
 | `qwen3coder30b_blksz_16` | `865 + 2*pos` | Measured per-block prefill cost of Qwen3-Coder-30B at 16-token blocks: a fixed part (projections, MLP) plus a part growing with the context attended to. Matches the vLLM logs (`idx=0→865, idx=100→1065`) and `compute_intensity_transform()` in `evaluate/`. Narrow range — position 1 vs 100 is 865 vs 1065 — so cost-aware policies rank close to cost-blind ones under it. |
+| `qwen3coder30b_blksz_64` | `3472 + 32*pos` | The **same** Qwen3-Coder-30B profile re-expressed at a 64-token block, for traces natively blocked at 64 tokens (agentX). Not an independent measurement and not a fit: a 64-token block costs exactly what its four constituent 16-token blocks cost — `Σ_{j=0..3} (865 + 2(4p+j)) = 4·865 + 32p + 12 = 3472 + 32p`. Verified bit-identical on the agentX trace (total prefill cost 4,499,190,960,784 under both models). Equivalently, with a linear/MLP term `a` per token and an attention term `b` per query-key pair, a block of `B` tokens costs `[a·B + b·B²/2] + [b·B²]·pos`; the 16-token constants give `a = 54`, `b = 1/128`, and `B = 64` yields this row. |
 
 ## Block identity (`--block-id`)
 

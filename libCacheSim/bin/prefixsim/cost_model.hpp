@@ -38,6 +38,16 @@ enum class CostModel {
   /// not a bug, and the first thing to check when compute-awareness looks like
   /// it is not paying.
   kQwen3Coder30bBlk16,
+  /// cost = 3472 + 32*position: the SAME measured Qwen3-Coder-30B profile at a 64-token
+  /// block size. Not an independent measurement -- it is the 16-token model re-expressed
+  /// at 4x the block, and it is exact rather than fitted:
+  ///     sum_{j=0..3} (865 + 2*(4p + j)) = 4*865 + 32p + 12 = 3472 + 32p
+  /// i.e. a 64-token block costs exactly what its four constituent 16-token blocks cost.
+  /// (Equivalently, with a linear/MLP term a per token and an attention term b per
+  /// query-key pair, a block of B tokens costs [a*B + b*B^2/2] + [b*B^2]*position; the
+  /// 16-token constants give a = 54, b = 1/128, and B = 64 gives 3472 + 32*position.)
+  /// For the agentX trace, whose blocks are natively 64 tokens.
+  kQwen3Coder30bBlk64,
 };
 
 inline double block_cost(CostModel model, int64_t position) {
@@ -49,6 +59,8 @@ inline double block_cost(CostModel model, int64_t position) {
       return pos1;
     case CostModel::kQwen3Coder30bBlk16:
       return 863.0 + 2.0 * pos1;  // == 865 + 2*position
+    case CostModel::kQwen3Coder30bBlk64:
+      return 3440.0 + 32.0 * pos1;  // == 3472 + 32*position
   }
   return 1.0;
 }
@@ -60,6 +72,8 @@ inline bool parse_cost_model(const std::string &name, CostModel &out) {
     out = CostModel::kPosition;
   } else if (name == "qwen3coder30b_blksz_16") {
     out = CostModel::kQwen3Coder30bBlk16;
+  } else if (name == "qwen3coder30b_blksz_64") {
+    out = CostModel::kQwen3Coder30bBlk64;
   } else {
     return false;
   }
@@ -74,6 +88,8 @@ inline const char *cost_model_name(CostModel model) {
       return "position";
     case CostModel::kQwen3Coder30bBlk16:
       return "qwen3coder30b_blksz_16";
+    case CostModel::kQwen3Coder30bBlk64:
+      return "qwen3coder30b_blksz_64";
   }
   return "?";
 }
