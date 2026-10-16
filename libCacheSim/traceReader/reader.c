@@ -8,8 +8,8 @@
 
 #include <ctype.h>
 
+#include "customizedReader/lcp.h"
 #include "customizedReader/lcs.h"
-#include "customizedReader/lcsllmReader.h"
 #include "customizedReader/oracle/oracleGeneralBin.h"
 #include "customizedReader/oracle/oracleTwrBin.h"
 #include "customizedReader/oracle/oracleTwrNSBin.h"
@@ -190,8 +190,8 @@ reader_t *setup_reader(const char *const trace_path,
     case VALPIN_TRACE:
       valpinReader_setup(reader);
       break;
-    case LCSLLM_TRACE:
-      lcsllmReader_setup(reader);
+    case LCP_TRACE:
+      lcpReader_setup(reader);
       break;
     default:
       ERROR("cannot recognize trace type: %c\n", reader->trace_type);
@@ -200,7 +200,7 @@ reader_t *setup_reader(const char *const trace_path,
 
   /* n_total_req != 0 means the setup function already knows the count, which is
    * the only workable answer for a format whose records vary in length
-   * (lcsllm). Deriving it from file_size / item_size would be wrong there, and
+   * (lcp). Deriving it from file_size / item_size would be wrong there, and
    * so would the modulus warning. */
   if (reader->trace_format == BINARY_TRACE_FORMAT && !reader->is_zstd_file &&
       reader->n_total_req == 0) {
@@ -225,9 +225,10 @@ reader_t *setup_reader(const char *const trace_path,
     abort();
   }
 
-  if (reader->is_zstd_file) {
+  if (reader->is_zstd_file && reader->trace_type != LCP_TRACE) {
     // we cannot get the total number requests
     // from compressed trace without reading the tracee
+    // (lcp can: its header carries the count)
     reader->n_total_req = 0;
   }
 
@@ -310,8 +311,8 @@ int read_one_req(reader_t *const reader, request_t *const req) {
       case VALPIN_TRACE:
         status = valpin_read_one_req(reader, req);
         break;
-      case LCSLLM_TRACE:
-        status = lcsllm_read_one_req(reader, req);
+      case LCP_TRACE:
+        status = lcp_read_one_req(reader, req);
         break;
       default:
         ERROR(
@@ -347,7 +348,9 @@ int read_one_req(reader_t *const reader, request_t *const req) {
     req->obj_size = 1;
   }
 
-  if (reader->init_params.obj_cost_field <= 0) {
+  /* lcp derives cost from block position rather than from a column */
+  if (reader->init_params.obj_cost_field <= 0 &&
+      reader->trace_type != LCP_TRACE) {
     req->obj_cost = 1;
   }
 
@@ -526,6 +529,12 @@ void reset_reader(reader_t *const reader) {
   } else {
     reader->mmap_offset = reader->trace_start_offset;
     curr_offset = reader->mmap_offset;
+  }
+
+  /* lcp reads a request record, then its blocks; rewinding mid-request
+   * without clearing that state would read the first record as a block */
+  if (reader->trace_type == LCP_TRACE) {
+    lcp_reset_reader(reader);
   }
 
   DEBUG("reset reader current offset %ld\n", curr_offset);

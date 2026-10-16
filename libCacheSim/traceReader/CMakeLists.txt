@@ -8,6 +8,7 @@ set(traceReader_sources_c
     generalReader/txt.c 
     generalReader/libcsv.c
     customizedReader/lcs.c
+    customizedReader/lcp.c
     reader.c
     sampling/spatial.c
     sampling/temporal.c
